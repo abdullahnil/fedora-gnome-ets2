@@ -1,0 +1,24 @@
+#!/bin/bash
+# Oyun açıkken performansı etkileyen GNOME eklentilerini geçici olarak kapatır.
+# fedora-gnome-ets2 tarafından kurulur. gamemode tarafından çağrılır (~/.config/gamemode.ini → [custom] start/end):
+#   oyun-eklentileri baslat   → listedeki açık eklentileri kapatır, hangilerini kapattığını not eder
+#   oyun-eklentileri bitir    → yalnızca kendi kapattıklarını geri açar
+# Liste: ~/.config/oyun-eklentileri.conf (her satıra bir eklenti kimliği)
+
+LISTE="${XDG_CONFIG_HOME:-$HOME/.config}/oyun-eklentileri.conf"
+NOT="${XDG_RUNTIME_DIR:-/tmp}/oyun-eklentileri.kapatilan"
+
+case "$1" in
+    baslat)
+        : > "$NOT"
+        grep -vE '^\s*(#|$)' "$LISTE" 2>/dev/null | while read -r uuid; do
+            if gnome-extensions info "$uuid" 2>/dev/null | grep -q 'State: ACTIVE'; then
+                gnome-extensions disable "$uuid" && echo "$uuid" >> "$NOT"
+            fi
+        done ;;
+    bitir)
+        [ -f "$NOT" ] || exit 0
+        while read -r uuid; do gnome-extensions enable "$uuid"; done < "$NOT"
+        rm -f "$NOT" ;;
+    *) echo "Kullanım: $0 baslat|bitir" >&2; exit 1 ;;
+esac
