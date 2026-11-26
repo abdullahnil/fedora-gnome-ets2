@@ -40,6 +40,7 @@ cd fedora-gnome-ets2
 | `teshis` | GNOME Shell'in donup donmadığını ölçer, donmalar düzenliyse aralığını bulur ve zamanlayıcılı eklentileri listeler. |
 | `teshis --dene EKLENTI` | Bir eklentiyi kapatıp yeniden ölçer: suçlu o mu, değil mi, değilse nerede aramalı. |
 | `analiz [KAYIT\|KLASÖR]` | MangoHud kayıtlarını akıcılık değerleriyle karşılaştırmalı tabloya döker. |
+| `oyunda-kapat [EKLENTI]` | Oyun açıkken kendiliğinden kapatılacak GNOME eklentilerini listeler ya da listeye ekler. |
 | `durum` | Şu anki Proton, başlatma seçenekleri ve ayarları gösterir. |
 | `geri-al` | Steam ayar dosyalarını aracın ilk çalıştırılmasından önceki hâline döndürür. |
 
@@ -94,6 +95,21 @@ gamemoderun taskset -c 0-15 mangohud %command% -nointro
   - **Sol Shift+F2:** 120 saniyelik kayıt başlatır.
   - **Sağ Shift+F12:** göstergeyi gizler ya da gösterir.
 - **Kayıtlar:** `~/Documents/MangoHud-kayitlar` klasörüne yazılır, `analiz` komutuyla okunur.
+
+### Oyunda takılma yapan eklentileri kapatma
+`kur` küçük bir düzenek kurar. Oyun `gamemoderun` ile başladığında, listedeki GNOME eklentileri kendiliğinden kapatılır; oyun bitince (çökse bile) geri açılır. Böylece sevdiğin ama oyunda takılma yapan bir eklentiyi masaüstünde kullanmaya devam edebilirsin. Varsayılan listede yalnızca [takılma avında](#takılma-avı) bulunan public-ip-address var.
+
+| Dosya | Görevi |
+|---|---|
+| `~/.config/oyun-eklentileri.conf` | Oyunda kapatılacak eklentiler, her satıra bir kimlik. `fedora-gnome-ets2 oyunda-kapat EKLENTI` ile de eklenebilir. |
+| `~/.local/bin/oyun-eklentileri` | Kapatıp açan betik. Yalnızca **kendi kapattıklarını** geri açar; sen bilerek kapattığın bir eklentiyi açmaz. |
+| `~/.config/gamemode.ini` | gamemode'a oyun başlarken ve biterken bu betiği çalıştırmasını söyler (`[custom] start=` / `end=`). |
+
+Notlar:
+- **Mevcut `gamemode.ini`:** dosyada zaten bir `[custom]` bölümü varsa araç ona dokunmaz, ne eklenmesi gerektiğini yazar.
+- **Split lock:** split lock koruması zaten kapalıysa (`kernel.split_lock_mitigate=0`) `disable_splitlock=0` da eklenir. Böylece gamemode'un her oyunda yetkisiz denediği ve günlüğü kirleten `Failed to update split_lock_mitigate` hatası susar.
+- **Açılıştaki tek takılma:** GNOME bir eklentiyi kapatınca ondan sonra yüklenen eklentileri de bir kez yeniden başlatır. Bu, oyunun açılış ekranında belki tek bir anlık takılma yapar; sürüş sırasında bir etkisi yoktur.
+- **Kalan hata:** günlükte kalan `Failed to update cpu governor policy` hatası da zararsız. gamemode işlemciyi performans kipine almaya çalışıyor ama yetkisi yok; işlemci tuned sayesinde zaten o kipte.
 
 ### Kontrol edilenler
 - **Güç profili:** HP laptoplarda `performance` olmalı. Bu, Windows'taki OMEN Gaming Hub Performans modunun karşılığı.
@@ -193,7 +209,12 @@ Eklentilerin kodunda 30 saniyelik zamanlayıcılar arandı (`araclar/eklenti_tar
 ```
 80 ms üstü donma: önce 2, eklenti kapalıyken 0
 ✓ Suçlu bu: public-ip-address@theophilediot.github.io.
+  Eklentiyi kullanmaya devam edip yalnızca oyunda kapatmak için: fedora-gnome-ets2 oyunda-kapat public-ip-address@theophilediot.github.io
 ```
+
+**Çözüm:** Eklentiyi tamamen kapatmak yerine [yalnızca oyun açıkken kapatılıyor](#oyunda-takılma-yapan-eklentileri-kapatma). Masaüstünde açık, oyunda kapalı.
+
+**Eklentinin neden takıldığına dair tahmin (ölçülmedi):** Eklenti her güncellemede iki HTTPS sorgusunun yanında VPN tünelini ve yerel IP'leri kontrol etmek için dört ayrı program da başlatıyor (`ip addr`, `ip route` ×2, `ip link`). Bunları GNOME Shell'in kendi süreci içinden başlatıyor. Shell büyük bir süreç olduğu için her yeni program başlatma onu bir anlığına durdurabiliyor.
 
 Zamanlayıcı taraması tek başına yetmiyor: glocalsend ve screen-time'ın 30 saniyelik zamanlayıcısı olmasına rağmen ikisi de suçsuzdu. Her şüpheli **kapatılıp ölçülerek** doğrulanmalı. Geriye her 10 saniyede bir 26 ms'lik küçük gecikmeler kaldı. Aralığı day-progress eklentisinin 10 saniyelik zamanlayıcısına uyuyor, ama bu ölçülerek doğrulanmadı. En fazla tek bir kare kaybettiriyor ve hissedilmiyor.
 
@@ -245,7 +266,7 @@ Aynı yol, aynı ayarlar, 2 dakikalık MangoHud kayıtları (`./fedora-gnome-ets
   rm ~/.local/bin/truckersmp-ets2 ~/.local/share/applications/truckersmp-ets2.desktop
   rm -r ~/.local/share/truckersmp-cli   # TruckersMP'nin Proton klasörü; ortak profil bağlantı olduğu için profillerin silinmez
   ```
-- **Takılma sebebi eklenti:** kapalı tutmak istemezsen `gnome-extensions enable public-ip-address@theophilediot.github.io` ile açıp ayarlarından yenileme aralığını uzat (ör. 1800 sn).
+- **Oyunda eklenti kapatma:** `~/.config/gamemode.ini` içindeki `[custom]` satırlarını sil ve `~/.local/bin/oyun-eklentileri` ile `~/.config/oyun-eklentileri.conf` dosyalarını kaldır.
 
 ## Lisans
 
