@@ -1,0 +1,434 @@
+#!/bin/bash
+# fedora-gnome-ets2 — Euro Truck Simulator 2'yi Fedora + GNOME'da Proton ile akıcı çalıştırmak için
+# kurulum, Windows'tan taşıma, TruckersMP ve takılma teşhis aracı.
+#
+#   fedora-gnome-ets2 kur            Paketler, Proton, başlatma seçenekleri, MangoHud ayarı
+#   fedora-gnome-ets2 tasi           Oyunu ve profilleri Windows bölümünden kopyala
+#   fedora-gnome-ets2 truckersmp     TruckersMP'yi (truckersmp-cli) kur ve başlatıcı ekle
+#   fedora-gnome-ets2 teshis         GNOME Shell donmalarını ölç, şüpheli eklentileri bul
+#   fedora-gnome-ets2 teshis --dene EKLENTI   Bir eklentiyi kapatıp yeniden ölç
+#   fedora-gnome-ets2 analiz [KAYIT|KLASÖR]   MangoHud kayıtlarını karşılaştır
+#   fedora-gnome-ets2 durum          Şu anki ayarları göster
+#   fedora-gnome-ets2 geri-al        Steam ayarlarını son yedekten geri yükle
+set -euo pipefail
+
+KOK="$(dirname "$(readlink -f "$0")")"
+ARAC="$KOK/araclar"
+APPID=227300
+PROTON_AD="proton_experimental"
+PROTON_KLASOR="Proton - Experimental"
+MANGOHUD_AYAR="$HOME/.config/MangoHud/ets2.conf"
+KAYIT_KLASORU="$HOME/Documents/MangoHud-kayitlar"
+
+if [ -t 1 ]; then Y=$'\e[1;32m'; S=$'\e[1;33m'; K=$'\e[1;31m'; M=$'\e[1;34m'; N=$'\e[0m'; else Y=; S=; K=; M=; N=; fi
+adim()  { echo; echo "${M}==>${N} $*"; }
+bilgi() { echo "    $*"; }
+uyari() { echo "    ${S}$*${N}"; }
+hata()  { echo "${K}HATA:${N} $*" >&2; exit 1; }
+sor()   { local c; read -r -p "    $1 [E/h] " c </dev/tty || c=; [[ ! "$c" =~ ^[hHnN] ]]; }
+steampy() { python3 -I "$ARAC/steam.py" "$@"; }
+
+[ "$EUID" -eq 0 ] && hata "sudo ile değil, normal kullanıcı olarak çalıştır. Gerektiğinde şifre sorulur."
+
+# ---------- donanım ----------
+nvidia_var()   { command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1; }
+hibrit_ekran() { [ "$(lspci 2>/dev/null | grep -ciE 'vga|3d controller|display controller')" -gt 1 ]; }
+# Intel hibrit işlemcilerde (12. nesil ve sonrası) hızlı çekirdekler, ör. "0-15"
+p_cekirdekler() { cat /sys/devices/cpu_core/cpus 2>/dev/null || true; }
+
+# ---------- Steam ----------
+steam_acik() { pgrep -x steam >/dev/null || pgrep -x steamwebhelper >/dev/null; }
+steam_kapat() {
+    steam_acik || return 0
+    bilgi "Steam kapatılıyor (ayarları Steam açıkken değiştirmek mümkün değil)..."
+    steam -shutdown >/dev/null 2>&1 || true
+    for _ in $(seq 60); do steam_acik || return 0; sleep 1; done
+    hata "Steam kapanmadı. Steam'i elle kapatıp tekrar dene."
+}
+steam_ac() { (setsid steam -silent >/dev/null 2>&1 &); }
+manifest() { echo "$(steampy kutuphane)/appmanifest_$APPID.acf"; }
+oyun_kurulu_bekle() {   # Steam güncellemeyi bitirene kadar bekle (StateFlags 4 = kurulu ve güncel)
+    local m; m="$(manifest)"
+    for _ in $(seq 720); do
+        [ "$(grep -m1 '"StateFlags"' "$m" 2>/dev/null | tr -dc 0-9)" = 4 ] && return 0
+        sleep 5
+    done
+    uyari "Steam hâlâ indiriyor; bitince komutu yeniden çalıştır."; return 1
+}
+on_ek() { echo "$(steampy kutuphane)/compatdata/$APPID/pfx/drive_c/users/steamuser/Documents/Euro Truck Simulator 2"; }
+
+baslatma_secenekleri() {
+    local s=""
+    if nvidia_var; then
+        hibrit_ekran && s+="DXVK_FILTER_DEVICE_NAME=NVIDIA __NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only "
+        s+="__GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1 "
+    fi
+    s+="MANGOHUD_CONFIGFILE=\$HOME/.config/MangoHud/ets2.conf gamemoderun "
+    local p; p="$(p_cekirdekler)"
+    [ -n "$p" ] && s+="taskset -c $p "
+    s+="mangohud %command% -nointro"
+    echo "$s"
+}
+
+mangohud_ayari_yaz() {
+    mkdir -p "$(dirname "$MANGOHUD_AYAR")" "$KAYIT_KLASORU"
+    [ -f "$MANGOHUD_AYAR" ] && cp "$MANGOHUD_AYAR" "$MANGOHUD_AYAR.yedek-$(date +%Y%m%d-%H%M%S)"
+    cat > "$MANGOHUD_AYAR" <<EOF
+# fedora-gnome-ets2 tarafından oluşturuldu
+# FPS, kare süresi grafiği (takılmalar sivri tepe olarak görünür), işlemci/ekran kartı durumu
+fps
+frametime
+frame_timing
+cpu_stats
+cpu_temp
+core_load
+gpu_stats
+gpu_temp
+gpu_power
+vram
+ram
+position=top-left
+font_size=20
+toggle_hud=Shift_R+F12
+
+# FPS sınırı: ilk değer açılışta geçerli; sol Shift+F1 sırayla değiştirir (0 = sınırsız).
+# 144 Hz ekranda 72 ve 48 yenilemeye tam bölünür; 60 bölünmez ama ölçümlerde en düzenli sonucu verdi.
+fps_limit=60,72,48,0
+toggle_fps_limit=Shift_L+F1
+fps_limit_method=early
+
+# Kayıt: sol Shift+F2 başlatır, 120 sn sonra kendiliğinden biter.
+# Dikkat: MangoHud 0.8.3-rc1'de kayıt bittiğinde oyun kapanıyor; önce oyunu kaydet.
+toggle_logging=Shift_L+F2
+log_duration=120
+output_folder=$KAYIT_KLASORU
+EOF
+}
+
+# ---------- komutlar ----------
+kmt_kur() {
+    echo "${Y}fedora-gnome-ets2 — kurulum${N}"
+    adim "1/4 Paketler (gamemode, MangoHud)"
+    local eksik=()
+    rpm -q gamemode >/dev/null 2>&1 || eksik+=(gamemode)
+    rpm -q mangohud >/dev/null 2>&1 || eksik+=(mangohud)
+    if [ ${#eksik[@]} -gt 0 ]; then sudo dnf install -y "${eksik[@]}"; else bilgi "Kurulu."; fi
+
+    adim "2/4 Donanım"
+    if nvidia_var; then
+        bilgi "NVIDIA: $(nvidia-smi --query-gpu=name,enforced.power.limit --format=csv,noheader | head -1)"
+        hibrit_ekran && bilgi "Hibrit ekran kartı: oyun NVIDIA'ya zorlanacak (Intel'i seçmesin)."
+    else
+        uyari "NVIDIA bulunamadı; NVIDIA'ya özel ayarlar eklenmeyecek."
+    fi
+    local p; p="$(p_cekirdekler)"
+    if [ -n "$p" ]; then bilgi "Intel hibrit işlemci: oyun yalnızca hızlı çekirdeklerde ($p) çalışacak."
+    else bilgi "Hibrit işlemci değil; çekirdek sabitleme eklenmeyecek."; fi
+    local pp; pp="$(cat /sys/firmware/acpi/platform_profile 2>/dev/null || true)"
+    [ -n "$pp" ] && [ "$pp" != performance ] && uyari "Güç profili '$pp'. Oyun oynarken 'performance' (Performans) seç."
+
+    adim "3/4 MangoHud ayarı ($MANGOHUD_AYAR)"
+    mangohud_ayari_yaz
+    bilgi "Yazıldı. Sol Shift+F1 FPS sınırı, sol Shift+F2 kayıt, sağ Shift+F12 göster/gizle."
+
+    adim "4/4 Steam: Proton ve başlatma seçenekleri"
+    steam_kapat
+    steampy uyumluluk-yaz "$APPID" "$PROTON_AD" >/dev/null
+    local eski yeni; eski="$(steampy baslatma-oku "$APPID")"; yeni="$(baslatma_secenekleri)"
+    [ -n "$eski" ] && [ "$eski" != "$yeni" ] && bilgi "Önceki başlatma seçenekleri: $eski"
+    steampy baslatma-yaz "$APPID" "$yeni" >/dev/null
+    bilgi "Proton: $PROTON_AD"
+    bilgi "Başlatma seçenekleri: $yeni"
+    bilgi "(Steam ayar dosyalarının yedekleri .yedek-TARIH uzantısıyla alındı.)"
+    steam_ac
+    echo; echo "${Y}Hazır.${N} Steam'den ETS2'yi aç."
+    if [ -z "$(steampy oyun "$APPID")" ]; then bilgi "ETS2 kurulu değil. Windows'tan taşımak için: $0 tasi"; fi
+    bilgi "Takılma olursa: $0 teshis"
+}
+
+kmt_tasi() {
+    echo "${Y}fedora-gnome-ets2 — Windows'tan taşıma${N}"
+    command -v rsync >/dev/null || sudo dnf install -y rsync
+    adim "1/5 Windows bölümleri aranıyor (salt okunur bağlanır, hiçbir şey değiştirilmez)"
+    BAGLANANLAR=()      # betik bitince ayrılacak bölümler (trap EXIT için genel)
+    local dev yer
+    while read -r dev tur; do
+        if [ "$tur" = BitLocker ]; then uyari "$dev BitLocker ile şifreli, atlanıyor."; continue; fi
+        yer="$(findmnt -no TARGET "$dev" 2>/dev/null | head -1 || true)"
+        if [ -z "$yer" ]; then
+            udisksctl mount -b "$dev" -o ro >/dev/null 2>&1 && BAGLANANLAR+=("$dev") || { uyari "$dev bağlanamadı."; continue; }
+            yer="$(findmnt -no TARGET "$dev" | head -1)"
+        fi
+        bilgi "$dev → $yer"
+    done < <(lsblk -rpno NAME,FSTYPE | awk '$2=="ntfs"||$2=="ntfs3"||$2=="BitLocker"')
+    trap 'for d in "${BAGLANANLAR[@]}"; do udisksctl unmount -b "$d" >/dev/null 2>&1 || true; done' EXIT
+
+    adim "2/5 ETS2 dosyaları aranıyor"
+    local belge="" oyun_win="" m
+    for m in $(lsblk -rpno NAME,FSTYPE | awk '$2=="ntfs"||$2=="ntfs3"{print $1}'); do
+        yer="$(findmnt -no TARGET "$m" 2>/dev/null | head -1 || true)"; [ -n "$yer" ] || continue
+        for d in "$yer"/Users/*/Documents/"Euro Truck Simulator 2" "$yer"/Users/*/OneDrive/*/"Euro Truck Simulator 2"; do
+            [ -d "$d/profiles" ] || [ -d "$d/steam_profiles" ] && { belge="$d"; break; }
+        done
+        for s in "$yer/Program Files (x86)/Steam/steamapps" "$yer/SteamLibrary/steamapps" "$yer/Steam/steamapps" "$yer"/*/SteamLibrary/steamapps; do
+            [ -f "$s/appmanifest_$APPID.acf" ] && [ -d "$s/common/Euro Truck Simulator 2" ] && { oyun_win="$s"; break; }
+        done
+    done
+    if [ -n "$belge" ]; then bilgi "Profiller ve ayarlar: $belge ($(du -sh "$belge" | cut -f1))"; else uyari "Profil klasörü bulunamadı."; fi
+    [ -n "$oyun_win" ] && bilgi "Oyun: $oyun_win/common/Euro Truck Simulator 2 ($(du -sh "$oyun_win/common/Euro Truck Simulator 2" | cut -f1))" \
+                       || uyari "Windows'ta kurulu oyun bulunamadı; oyunu Steam indirecek."
+    [ -z "$belge$oyun_win" ] && hata "Windows'ta ETS2'ye ait bir şey bulunamadı."
+
+    adim "3/5 Oyun dosyaları"
+    steam_kapat
+    if [ -n "$(steampy oyun "$APPID")" ]; then
+        bilgi "ETS2 Linux'ta zaten kurulu, oyun dosyaları kopyalanmıyor."
+    elif [ -n "$oyun_win" ]; then
+        local hedef; hedef="$(steampy kutuphane)"
+        bilgi "Kopyalanıyor → $hedef/common (yeniden indirmekten kurtarır; Proton aynı Windows dosyalarını kullanır)"
+        cp -a --no-preserve=ownership "$oyun_win/common/Euro Truck Simulator 2" "$hedef/common/"
+        cp "$oyun_win/appmanifest_$APPID.acf" "$hedef/"
+    fi
+    # Proton'a zorlanmazsa Steam Linux sürümünü indirip Windows dosyalarının üstüne yazar
+    [ "$(steampy uyumluluk-oku "$APPID")" ] || steampy uyumluluk-yaz "$APPID" "$PROTON_AD" >/dev/null
+    [ "$(steampy baslatma-oku "$APPID")" ] || steampy baslatma-yaz "$APPID" "$(baslatma_secenekleri)" >/dev/null
+    steam_ac
+    bilgi "Steam eksik/güncel parçaları indiriyor, bekleniyor..."
+    oyun_kurulu_bekle || return 1
+    bilgi "Oyun hazır."
+
+    [ -n "$belge" ] || { echo; echo "${Y}Tamam.${N}"; return 0; }
+    adim "4/5 Proton klasörü (ilk açılış)"
+    local hedef_belge; hedef_belge="$(on_ek)"
+    if [ ! -f "$hedef_belge/config.cfg" ]; then
+        bilgi "Oyun bir kez açılıp kapatılacak; Proton'un Windows klasörü ilk açılışta oluşur."
+        steam "steam://rungameid/$APPID" >/dev/null 2>&1 &
+        for _ in $(seq 200); do [ -f "$hedef_belge/config.cfg" ] && break; sleep 3; done
+        [ -f "$hedef_belge/config.cfg" ] || hata "Oyun açılmadı. Steam'den bir kez açıp kapat, sonra komutu yeniden çalıştır."
+        sleep 10
+        pkill -x eurotrucks2.exe 2>/dev/null || true
+        for _ in $(seq 60); do pgrep -x eurotrucks2.exe >/dev/null || break; sleep 1; done
+    fi
+    pgrep -x eurotrucks2.exe >/dev/null && hata "ETS2 açık; kapatıp tekrar dene."
+
+    adim "5/5 Profiller, modlar ve ayarlar"
+    if [ -n "$(ls -A "$hedef_belge/profiles" "$hedef_belge/steam_profiles" 2>/dev/null)" ]; then
+        local yedek; yedek="$hedef_belge/../ets2-linux-profilleri-$(date +%Y%m%d-%H%M%S).tar.gz"
+        uyari "Linux'ta zaten profil var. Windows'takiler yalnızca Linux'takinden YENİ olan dosyaların üstüne yazılacak."
+        sor "Devam edilsin mi? (önce mevcut profillerin yedeği alınır)" || { bilgi "Vazgeçildi."; return 0; }
+        tar -C "$hedef_belge" -czf "$yedek" profiles steam_profiles config.cfg 2>/dev/null || true
+        bilgi "Yedek: $(readlink -f "$yedek")"
+    fi
+    # --update: hedefte daha yeni olan dosyaların (Linux'ta oynanmış kayıtlar) üstüne yazma
+    rsync -rt --update --exclude='*.bak/' --exclude='cache/' --exclude='crash_detection/' --exclude='*.log.txt' \
+          --exclude='*.crash.txt' --exclude='net.log' --exclude='bugs.txt' --exclude='*.lnk' \
+          "$belge/" "$hedef_belge/"
+    local sorun=0
+    for d in profiles steam_profiles mod; do
+        [ -d "$belge/$d" ] || continue
+        if diff -rq "$belge/$d" "$hedef_belge/$d" >/dev/null; then bilgi "✓ $d aynı"; else uyari "$d farklı!"; sorun=1; fi
+    done
+    if cmp -s "$belge/config.cfg" "$hedef_belge/config.cfg"; then bilgi "✓ config.cfg (grafik ayarları) aynı"; fi
+    echo
+    if [ $sorun = 0 ]; then echo "${Y}Taşıma tamam.${N} Windows tarafında hiçbir şey değişmedi."
+    else echo "${S}Taşıma bitti; bazı dosyalar farklı (Linux'ta daha yeni olanlar korundu).${N}"; fi
+    bilgi "Gamepad/direksiyon kullanıyorsan oyunun kontrol ayarlarından yeniden ata (Linux'ta kimlikleri farklı)."
+}
+
+kmt_truckersmp() {
+    echo "${Y}fedora-gnome-ets2 — TruckersMP${N}"
+    local oyun; oyun="$(steampy oyun "$APPID")"
+    [ -n "$oyun" ] || hata "ETS2 kurulu değil. Önce Steam'den kur ya da: $0 tasi"
+    adim "1/4 truckersmp-cli (topluluk aracı, resmi değil)"
+    command -v pipx >/dev/null || sudo dnf install -y pipx
+    if pipx list --short 2>/dev/null | grep -q '^truckersmp-cli '; then pipx upgrade truckersmp-cli >/dev/null || true
+    else pipx install 'truckersmp-cli[optional]'; fi
+    bilgi "$(pipx list --short | grep '^truckersmp-cli ')"
+
+    adim "2/4 Sürüm uyumu"
+    local destek oyun_s
+    destek="$(curl -fsS https://api.truckersmp.com/v2/version 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["supported_game_version"])' 2>/dev/null || true)"
+    oyun_s="$(grep -m1 -oE 'init ver\.[0-9.]+s' "$(on_ek)/game.log.txt" 2>/dev/null | sed 's/init ver\.//' || true)"
+    bilgi "TruckersMP'nin desteklediği: ${destek:-bilinmiyor}   ·   Senin oyunun: ${oyun_s:-bilinmiyor (oyunu bir kez açınca görünür)}"
+    [ -n "$destek" ] && [ -n "$oyun_s" ] && [ "$destek" != "$oyun_s" ] && \
+        uyari "Sürümler farklı. TruckersMP yeni sürüme yetişene kadar çok oyunculu açılmayabilir."
+
+    adim "3/4 Başlatıcı (~/.local/bin/truckersmp-ets2)"
+    local proton runtime p env=""
+    proton="$(steampy proton "$PROTON_KLASOR")"; [ -n "$proton" ] || hata "Steam'de '$PROTON_KLASOR' kurulu değil. Steam'den ETS2'yi bir kez Proton ile aç."
+    runtime="$(steampy runtime "$proton")"; [ -n "$runtime" ] || hata "Steam Linux Runtime bulunamadı."
+    p="$(p_cekirdekler)"
+    if nvidia_var; then
+        hibrit_ekran && env+="export DXVK_FILTER_DEVICE_NAME=NVIDIA __NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only"$'\n'
+        env+="export __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1"$'\n'
+    fi
+    mkdir -p "$HOME/.local/bin"
+    cat > "$HOME/.local/bin/truckersmp-ets2" <<EOF
+#!/bin/bash
+# fedora-gnome-ets2 tarafından oluşturuldu: TruckersMP (ETS2)
+# Steam'de kurulu oyunu Proton + DX11 ile açar. truckersmp-cli "start" kullanır:
+# oyunu güncellemez, Steam'i kapatmaz; yalnızca TruckersMP dosyalarını indirir/günceller.
+# Kendi Proton klasörünü kullanır (tek oyunculu oyunun klasörüne dokunmaz), ama profil
+# ve ayarlar klasörü tek oyunculu oyunla ortaktır (aşağıdaki bağlantı).
+
+# Steam açık olmalı (oyun sahipliği ve Steam API için)
+if ! pgrep -x steam >/dev/null; then
+    setsid steam -silent >/dev/null 2>&1 &
+    for _ in \$(seq 60); do pgrep -x steamwebhelper >/dev/null && break; sleep 1; done
+    sleep 10
+fi
+
+# Profil, mod ve ayarları tek oyunculu oyunla paylaş
+TEK="$(on_ek)"
+COK="\$HOME/.local/share/truckersmp-cli/Euro Truck Simulator 2/prefix/pfx/drive_c/users/steamuser/Documents"
+if [ -d "\$COK" ] && [ -d "\$TEK" ] && [ ! -L "\$COK/Euro Truck Simulator 2" ]; then
+    [ -e "\$COK/Euro Truck Simulator 2" ] && mv "\$COK/Euro Truck Simulator 2" "\$COK/Euro Truck Simulator 2.ilk-acilis"
+    ln -s "\$TEK" "\$COK/Euro Truck Simulator 2"
+fi
+
+${env}export PULSE_LATENCY_MSEC=60          # ses takılmasına karşı daha büyük tampon
+export MANGOHUD=1 MANGOHUD_CONFIGFILE="\$HOME/.config/MangoHud/ets2.conf"
+
+exec gamemoderun ${p:+taskset -c $p }"\$HOME/.local/bin/truckersmp-cli" --proton --rendering-backend dx11 \\
+    --gamedir "$oyun" \\
+    --protondir "$proton" \\
+    --steamruntimedir "$runtime" \\
+    "\$@" start ets2mp
+EOF
+    chmod +x "$HOME/.local/bin/truckersmp-ets2"
+    bash -n "$HOME/.local/bin/truckersmp-ets2"
+    bilgi "Proton: $proton"
+    bilgi "Runtime: $runtime"
+
+    adim "4/4 Uygulama menüsü"
+    local simge=steam
+    ls "$HOME"/.local/share/icons/hicolor/*/apps/steam_icon_$APPID.png >/dev/null 2>&1 && simge="steam_icon_$APPID"
+    mkdir -p "$HOME/.local/share/applications"
+    cat > "$HOME/.local/share/applications/truckersmp-ets2.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=TruckersMP (Euro Truck Simulator 2)
+Comment=Euro Truck Simulator 2 multiplayer
+Exec=$HOME/.local/bin/truckersmp-ets2
+Icon=$simge
+Terminal=false
+Categories=Game;Simulation;
+EOF
+    bilgi "Menüde: TruckersMP (Euro Truck Simulator 2)"
+    echo; echo "${Y}Hazır.${N} İlk açılışta TruckersMP dosyaları iner ve kendi Proton klasörü oluşur."
+    bilgi "İlk açılıştan sonra bir kez kapatıp yeniden aç: profil ve ayarlar o zaman tek oyunculuyla birleşir."
+    uyari "Terminalde düz 'truckersmp-cli' çalıştırma; kendi Proton'unu arar. Her zaman 'truckersmp-ets2' kullan."
+}
+
+kmt_teshis() {
+    local dene="" sure=70 birak=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dene) dene="$2"; shift ;;
+            --sure) sure="$2"; shift ;;
+            --kapali-birak) birak=1 ;;
+            *) hata "Bilinmeyen seçenek: $1" ;;
+        esac; shift
+    done
+    echo "${Y}fedora-gnome-ets2 — teşhis${N}"
+    if [ -n "$dene" ]; then
+        gnome-extensions info "$dene" >/dev/null 2>&1 || hata "Eklenti bulunamadı: $dene"
+        adim "1/2 Önce ölçüm ($sure sn, masaüstüne dokunma)"
+        local once sonra; once="$(python3 -I "$ARAC/shell_yokla.py" "$sure" --json)"
+        adim "2/2 '$dene' kapalıyken ölçüm ($sure sn)"
+        gnome-extensions disable "$dene"; sleep 3
+        sonra="$(python3 -I "$ARAC/shell_yokla.py" "$sure" --json)"
+        python3 -I - "$once" "$sonra" "$dene" <<'PY'
+import json, sys
+once, sonra, ad = json.loads(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3]
+def ozet(d): return len([x for x in d["donmalar"] if x["ms"] >= 80])
+def faz(d):
+    p = d["periyot"]
+    if not p or not d["donmalar"]: return None
+    h, m, s = d["donmalar"][0]["saat"].split(":"); return (int(h)*3600 + int(m)*60 + float(s)) % p
+a, b = ozet(once), ozet(sonra)
+print(f"    80 ms üstü donma: önce {a}, eklenti kapalıyken {b}")
+if a and not b:
+    print(f"    ✓ Suçlu bu: {ad}. Kapalı tut ya da (varsa) yenileme aralığını uzat.")
+elif a and b:
+    fa, fb = faz(once), faz(sonra)
+    if fa is not None and fb is not None and min(abs(fa - fb), once["periyot"] - abs(fa - fb)) > 2:
+        print("    ✗ Bu değil, ama donmaların zamanlaması kaydı. GNOME bir eklentiyi kapatınca ondan sonra")
+        print("      yüklenen eklentileri de yeniden başlatır: suçlu, sırada bundan SONRA gelen eklentilerden biri.")
+    else:
+        print("    ✗ Bu değil (donmalar aynı saniyelerde sürüyor). Suçlu bundan ÖNCE yüklenen eklentilerden biri olabilir.")
+else:
+    print("    Önce de belirgin donma yoktu; karşılaştırma için donmaların olduğu bir anda tekrar dene.")
+PY
+        if [ $birak = 0 ]; then gnome-extensions enable "$dene"; bilgi "'$dene' yeniden açıldı (kapalı kalsın istersen: --kapali-birak)."; fi
+        return 0
+    fi
+
+    adim "1/3 Sistem"
+    if nvidia_var; then bilgi "NVIDIA: $(nvidia-smi --query-gpu=name,enforced.power.limit,power.max_limit --format=csv,noheader | head -1)"; fi
+    bilgi "Hızlı çekirdekler: $(p_cekirdekler || true)  ·  güç profili: $(cat /sys/firmware/acpi/platform_profile 2>/dev/null || echo ?)  ·  işlemci yöneticisi: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo ?)"
+    local slm; slm="$(cat /proc/sys/kernel/split_lock_mitigate 2>/dev/null || echo ?)"
+    bilgi "split_lock_mitigate: $slm $( [ "$slm" = 1 ] && echo '(açık: bazı oyunlar her split lock'"'"'ta bekletilir; sudo sysctl kernel.split_lock_mitigate=0)')"
+    bilgi "Split lock'a düşen oyun süreci (bu açılıştan beri): $(journalctl -k -b --no-pager 2>/dev/null | grep -c 'eurotrucks2.*split_lock' || true)"
+
+    adim "2/3 GNOME Shell donmaları ($sure sn ölçülüyor — oyun açıkken de çalıştırabilirsin)"
+    local sonuc per
+    sonuc="$(python3 -I "$ARAC/shell_yokla.py" "$sure" --json)"
+    python3 -I - "$sonuc" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+if not d["donmalar"]:
+    print("    ✓ Belirgin donma yok.")
+for x in d["donmalar"]:
+    print(f"      {x['saat']}   {x['ms']:4d} ms")
+if d["periyot"]:
+    print(f"    ⚠ Donmalar düzenli: her ~{d['periyot']:g} sn'de bir.")
+PY
+    per="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["periyot"] or "")' "$sonuc")"
+
+    adim "3/3 Eklentiler"
+    python3 -I "$ARAC/eklenti_tara.py" ${per:+"$per"}
+}
+
+kmt_analiz() {
+    [ $# -gt 0 ] || set -- "$KAYIT_KLASORU"
+    python3 -I "$ARAC/kayit_analiz.py" "$@"
+}
+
+kmt_durum() {
+    echo "${Y}fedora-gnome-ets2 — durum${N}"
+    bilgi "Oyun: $(steampy oyun "$APPID" || true)"
+    bilgi "Proton: $(steampy uyumluluk-oku "$APPID" || true)"
+    bilgi "Başlatma seçenekleri: $(steampy baslatma-oku "$APPID" || true)"
+    bilgi "MangoHud ayarı: $([ -f "$MANGOHUD_AYAR" ] && echo "$MANGOHUD_AYAR" || echo yok)"
+    bilgi "gamemode: $(rpm -q --qf '%{VERSION}\n' gamemode 2>/dev/null | head -1 || echo yok)   mangohud: $(rpm -q --qf '%{VERSION}\n' mangohud 2>/dev/null | head -1 || echo yok)"
+    bilgi "TruckersMP başlatıcı: $([ -x "$HOME/.local/bin/truckersmp-ets2" ] && echo var || echo yok)"
+    local etkin; etkin="$(gnome-extensions list --enabled 2>/dev/null || true)"
+    if grep -q public-ip-address <<<"$etkin"; then uyari "public-ip-address eklentisi açık (30 sn'lik takılma sebebi olabilir)."; fi
+    return 0
+}
+
+kmt_geri_al() {
+    echo "${Y}fedora-gnome-ets2 — geri al${N}"
+    steam_kapat
+    local kok; kok="$(steampy kok)"
+    for f in "$kok/config/config.vdf" "$kok"/userdata/*/config/localconfig.vdf; do
+        local y; y="$(ls -t "$f".yedek-* 2>/dev/null | tail -1 || true)"   # en ESKİ yedek = ilk kurulumdan önceki hal
+        [ -n "$y" ] || { bilgi "$f için yedek yok."; continue; }
+        cp "$y" "$f"; bilgi "Geri yüklendi: $f ← $(basename "$y")"
+    done
+    steam_ac
+    bilgi "MangoHud ayarı ($MANGOHUD_AYAR) ve TruckersMP başlatıcısı yerinde bırakıldı."
+}
+
+komut="${1:-yardim}"; shift || true
+case "$komut" in
+    kur) kmt_kur "$@" ;;
+    tasi) kmt_tasi "$@" ;;
+    truckersmp) kmt_truckersmp "$@" ;;
+    teshis) kmt_teshis "$@" ;;
+    analiz) kmt_analiz "$@" ;;
+    durum) kmt_durum "$@" ;;
+    geri-al) kmt_geri_al "$@" ;;
+    *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac
